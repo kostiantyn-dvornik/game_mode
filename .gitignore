@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime state files (written to %APPDATA%\BrightnessController at runtime)
+*_state.json
+game_mode_state.json
+display_layout.json
+
+# Machine-specific overrides (real TV IP/MAC, etc.) — see game_mode.py
+local_config.py
