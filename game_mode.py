@@ -454,6 +454,73 @@ def _set_display_topology(clone: bool) -> bool:
         return subprocess.run(['DisplaySwitch.exe', '/extend'], capture_output=True).returncode == 0
 
 
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ('cbSize', wintypes.DWORD), ('rcMonitor', wintypes.RECT),
+        ('rcWork', wintypes.RECT), ('dwFlags', wintypes.DWORD),
+    ]
+
+_MONITOR_DEFAULTTOPRIMARY   = 1
+_MONITOR_DEFAULTTONEAREST   = 2
+_GW_OWNER                   = 4
+_GWL_EXSTYLE                = -20
+_WS_EX_TOOLWINDOW           = 0x00000080
+_SWP_NOZORDER_NOACTIVATE    = 0x0004 | 0x0010
+
+
+def _bring_windows_to_main_screen():
+    """Move visible top-level windows off any other monitor onto the primary one.
+
+    Windows already on the primary monitor, minimized, owned (dialogs,
+    tooltips, etc.), or without a titlebar are left alone. Size is kept,
+    just clamped to fit; moved windows are cascaded so they don't all land
+    in the same spot.
+    """
+    primary_hmon = _user32.MonitorFromPoint(wintypes.POINT(0, 0), _MONITOR_DEFAULTTOPRIMARY)
+    info = _MONITORINFO()
+    info.cbSize = ctypes.sizeof(_MONITORINFO)
+    _user32.GetMonitorInfoW(primary_hmon, ctypes.byref(info))
+    work = info.rcWork
+    max_w = work.right - work.left
+    max_h = work.bottom - work.top
+
+    hwnds = []
+    cb_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    @cb_type
+    def _enum(hwnd, lparam):
+        hwnds.append(hwnd)
+        return True
+
+    _user32.EnumWindows(_enum, 0)
+
+    moved = 0
+    for hwnd in hwnds:
+        if not _user32.IsWindowVisible(hwnd) or _user32.IsIconic(hwnd):
+            continue
+        if _user32.GetWindowTextLengthW(hwnd) == 0:
+            continue
+        if _user32.GetWindow(hwnd, _GW_OWNER) != 0:
+            continue
+        if _user32.GetWindowLongW(hwnd, _GWL_EXSTYLE) & _WS_EX_TOOLWINDOW:
+            continue
+        if _user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST) == primary_hmon:
+            continue
+
+        rect = wintypes.RECT()
+        if not _user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            continue
+        width = min(rect.right - rect.left, max_w)
+        height = min(rect.bottom - rect.top, max_h)
+        step = (moved % 10) * 30
+        _user32.SetWindowPos(hwnd, 0, work.left + step, work.top + step, width, height,
+                              _SWP_NOZORDER_NOACTIVATE)
+        moved += 1
+
+    if moved:
+        print(f"Moved {moved} window(s) to the main screen.")
+
+
 # ---------------------------------------------------------------------------
 # Monitor helpers
 # ---------------------------------------------------------------------------
@@ -613,11 +680,32 @@ def _set_power_by_name(monitor_name: str, state: int):
 class _IMMDevice(IUnknown):
     _iid_ = GUID('{D666063F-1587-4E43-81F1-B948E807363F}')
     _methods_ = [
-        COMMETHOD([], HRESULT, 'Activate'),
+        COMMETHOD([], HRESULT, 'Activate',
+            (['in'], ctypes.POINTER(GUID)),
+            (['in'], ctypes.c_ulong),
+            (['in'], ctypes.c_void_p),
+            (['out'], ctypes.POINTER(ctypes.POINTER(IUnknown)))),
         COMMETHOD([], HRESULT, 'OpenPropertyStore'),
         COMMETHOD([], HRESULT, 'GetId', (['out'], ctypes.POINTER(ctypes.c_wchar_p))),
         COMMETHOD([], HRESULT, 'GetState'),
     ]
+
+
+class _IAudioEndpointVolume(IUnknown):
+    _iid_ = GUID('{5CDF2C82-841E-4546-9722-0CF74078229A}')
+    _methods_ = [
+        COMMETHOD([], HRESULT, 'RegisterControlChangeNotify', (['in'], ctypes.c_void_p)),
+        COMMETHOD([], HRESULT, 'UnregisterControlChangeNotify', (['in'], ctypes.c_void_p)),
+        COMMETHOD([], HRESULT, 'GetChannelCount', (['out'], ctypes.POINTER(ctypes.c_uint))),
+        COMMETHOD([], HRESULT, 'SetMasterVolumeLevel',
+            (['in'], ctypes.c_float), (['in'], ctypes.c_void_p)),
+        COMMETHOD([], HRESULT, 'SetMasterVolumeLevelScalar',
+            (['in'], ctypes.c_float), (['in'], ctypes.c_void_p)),
+        COMMETHOD([], HRESULT, 'GetMasterVolumeLevel', (['out'], ctypes.POINTER(ctypes.c_float))),
+        COMMETHOD([], HRESULT, 'GetMasterVolumeLevelScalar', (['out'], ctypes.POINTER(ctypes.c_float))),
+    ]
+
+_CLSCTX_ALL = 23  # INPROC_SERVER | INPROC_HANDLER | LOCAL_SERVER | REMOTE_SERVER
 
 
 class _IMMDeviceCollection(IUnknown):
@@ -680,6 +768,30 @@ def _get_default_audio_id() -> str:
     enumerator = comtypes.client.CreateObject(_CLSID_MMDeviceEnumerator, interface=_IMMDeviceEnumerator)
     dev = enumerator.GetDefaultAudioEndpoint(0, 0)  # eRender, eConsole
     return dev.GetId()
+
+
+def _default_endpoint_volume() -> _IAudioEndpointVolume:
+    """Return the IAudioEndpointVolume interface for the current default render device."""
+    enumerator = comtypes.client.CreateObject(_CLSID_MMDeviceEnumerator, interface=_IMMDeviceEnumerator)
+    dev = enumerator.GetDefaultAudioEndpoint(0, 0)  # eRender, eConsole
+    return dev.Activate(_IAudioEndpointVolume._iid_, _CLSCTX_ALL, None).QueryInterface(_IAudioEndpointVolume)
+
+
+def _get_master_volume() -> float | None:
+    """Return the current default device's master volume (0.0-1.0), or None on failure."""
+    try:
+        return _default_endpoint_volume().GetMasterVolumeLevelScalar()
+    except Exception:
+        return None
+
+
+def _set_master_volume(level: float) -> bool:
+    """Set the current default device's master volume (0.0-1.0)."""
+    try:
+        _default_endpoint_volume().SetMasterVolumeLevelScalar(level, None)
+        return True
+    except Exception:
+        return False
 
 
 def _set_default_audio(endpoint_id: str) -> bool:
@@ -880,12 +992,17 @@ def game_mode_on():
 
     # Save desktop monitor brightness via DDC/CI (sbc can't reach it when cloned with the TV)
     desktop_brightness = _desktop_monitor_ddc_brightness('get')
+
+    # Save Windows master volume so it can be restored after game mode ends
+    windows_volume = _get_master_volume()
+
     STATE_FILE.write_text(json.dumps({
         "display_nPaths":       pre_nP,
         "display_nModes":       pre_nM,
         "display_paths_bytes":  paths_bytes,
         "display_modes_bytes":  modes_bytes,
         "desktop_brightness":   desktop_brightness,
+        "windows_volume":       windows_volume,
     }))
 
     # Set desktop monitor brightness to minimum before cloning
@@ -917,6 +1034,10 @@ def game_mode_on():
         _, friendly = next((d for d in devices if d[0] == endpoint_id), (None, audio_target))
         if _set_default_audio(endpoint_id):
             print(f"Audio switched to: {friendly}")
+            if _set_master_volume(1.0):
+                print("Windows volume maximized.")
+            else:
+                print("Warning: could not maximize Windows volume.")
         else:
             _popup_error(f"Failed to switch audio to '{friendly}'.\n\nThe device may not be responding.")
             print(f"Error: failed to switch audio to '{friendly}'.")
@@ -943,6 +1064,12 @@ def game_mode_off():
         print(f"Error: audio device '{audio_off_target}' not found.")
     elif _set_default_audio(speakers_id):
         print(f"Audio restored to: {audio_off_target}")
+        prev_volume = state.get("windows_volume")
+        if prev_volume is not None:
+            if _set_master_volume(prev_volume):
+                print(f"Windows volume restored to {round(prev_volume * 100)}%.")
+            else:
+                print("Warning: could not restore Windows volume.")
     else:
         _popup_error(f"Failed to restore audio to '{audio_off_target}'.")
         print(f"Error: failed to restore audio to '{audio_off_target}'.")
@@ -987,6 +1114,9 @@ def game_mode_off():
                 break
         else:
             print(f"Warning: could not restore desktop monitor brightness to {prev_brightness}%.")
+
+    # Bring any windows left on another monitor back to the main screen
+    _bring_windows_to_main_screen()
 
     print("Game mode OFF.")
 
