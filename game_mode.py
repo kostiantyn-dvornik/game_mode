@@ -432,6 +432,7 @@ def _set_display_topology(clone: bool) -> bool:
         used = sorted({
             desktop_path.sourceInfo.modeInfoIdx,
             desktop_path.targetInfo.modeInfoIdx,
+            tv_path.sourceInfo.modeInfoIdx,
             tv_path.targetInfo.modeInfoIdx,
         })
         idx_map = {old: new for new, old in enumerate(used)}
