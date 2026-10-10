@@ -936,6 +936,21 @@ def _tv_connect() -> HisenseTV | None:
     )
     return tv if tv.connect() else None
 
+def _tv_connect_retry(timeout: float = 25.0, interval: float = 2.0) -> HisenseTV | None:
+    """Keep trying _tv_connect() until it succeeds or timeout elapses.
+
+    Wake-on-LAN doesn't guarantee the TV's network stack is up right away —
+    boot time varies — so a single attempt after a fixed delay is fragile.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        tv = _tv_connect()
+        if tv is not None:
+            return tv
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(interval)
+
 def _tv_set_input(tv: HisenseTV, input_name: str) -> bool:
     """Switch TV to a named input ('tv', 'av', 'hdmi1'-'hdmi4'). Returns True on success."""
     if tv.set_source(input_name):
@@ -978,8 +993,7 @@ def game_mode_on():
 
     # Wake TV and verify it's reachable before doing anything else
     _tv_wake()
-    time.sleep(3)
-    tv = _tv_connect()
+    tv = _tv_connect_retry()
     if tv is None:
         _popup_error("TV is not reachable.\n\nMake sure the TV is powered on and connected to the network.")
         print("Aborted: TV not reachable.")
