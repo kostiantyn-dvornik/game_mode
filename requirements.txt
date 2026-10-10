@@ -1,5 +1,6 @@
 screen-brightness-control
 comtypes
+myhisense-tv
 winrt-Windows.Devices.Bluetooth
 winrt-Windows.Devices.Bluetooth.GenericAttributeProfile
 winrt-Windows.Devices.Enumeration

@@ -28,6 +28,12 @@ except ImportError:
     print("Missing dependency. Install it with:\n  pip install comtypes")
     sys.exit(1)
 
+try:
+    from hisense_tv.client import HisenseTV
+except ImportError:
+    print("Missing dependency. Install it with:\n  pip install myhisense-tv")
+    sys.exit(1)
+
 import subprocess as _subprocess
 
 _dxva2 = ctypes.windll.dxva2
@@ -51,9 +57,9 @@ DISPLAY_LAYOUT_FILE = _state_dir / "display_layout.json"
 # code (_set_display_extend_all sizes itself off len(MONITOR_NAMES)); the
 # only real ceiling is how many displays Windows/your GPU can drive at once.
 MONITOR_NAMES = {
-    "desktop": "HA240Y",  # primary desktop monitor — cloned onto the TV in game mode
-    "second":  "LG",      # secondary desktop monitor
-    "tv":      "Sharp",   # TV acting as a monitor
+    "desktop": "HA240Y",   # primary desktop monitor — cloned onto the TV in game mode
+    "second":  "LG FHD",   # secondary desktop monitor
+    "tv":      "HISENSE",  # TV acting as a monitor
 }
 # Left-to-right order used when arranging all configured monitors as an
 # extended desktop (see MONITOR_NAMES above) — must list the same roles.
@@ -61,39 +67,34 @@ MONITOR_ORDER_LTR = ("desktop", "second", "tv")
 
 # Default audio output devices (substring match against `audio list`).
 GAME_MODE_CONFIG = {
-    "audio_on":  "Sharp TV",                     # audio device while game mode is ON
+    "audio_on":  "HISENSE",                       # audio device while game mode is ON
     "audio_off": "High Definition Audio Device",  # audio device restored when game mode is OFF
     "tv_input":  "hdmi1",                         # TV input to activate in game mode
 }
 
-# TV network info, for ADB control + Wake-on-LAN. These are placeholders —
-# real values are machine-specific and shouldn't be committed to a public
-# repo. Override them in local_config.py (gitignored, see below) instead of
-# editing these defaults.
+# TV network info, for the Hisense VIDAA local control API + Wake-on-LAN.
+# These are placeholders — real values are machine-specific and shouldn't
+# be committed to a public repo. Override them in local_config.py
+# (gitignored, see below) instead of editing these defaults.
 TV_IP   = "192.168.1.100"
 TV_MAC  = "aa:bb:cc:dd:ee:ff"
-TV_PORT = 5555
+TV_PORT = 36669  # Hisense's local MQTT control port
 
-# TV HDMI input IDs — find yours via `adb shell dumpsys tv_input`.
-TV_INPUTS = {
-    "hdmi1": "com.mediatek.tvinput/.hdmi.HDMIInputService/HW5",
-    "hdmi2": "com.mediatek.tvinput/.hdmi.HDMIInputService/HW6",
-}
+# Client certificate/key for Hisense's local MQTT control API (mutual TLS).
+# These are the long-known, publicly shared credentials used throughout the
+# smart-home community (e.g. Home Assistant's Hisense TV integrations) for
+# controlling a Hisense/VIDAA TV you own over your own LAN — not a secret
+# tied to this TV specifically.
+HISENSE_CERT_FILE = Path(__file__).parent / "hisense_certs" / "rcm_certchain_pem.cer"
+HISENSE_KEY_FILE  = Path(__file__).parent / "hisense_certs" / "rcm_pem_privkey.pkcs8"
 
 GAME_MODE_TV_VOLUME = 22  # TV volume level while game mode is active (0-100)
 
 # Input/volume used by turn_on_tv.py when just turning the TV on normally
 # (as opposed to GAME_MODE_CONFIG["tv_input"] / GAME_MODE_TV_VOLUME above).
+# Valid inputs: "tv", "av", "hdmi1", "hdmi2", "hdmi3", "hdmi4".
 TV_ON_INPUT  = "hdmi1"
 TV_ON_VOLUME = 18
-
-# Path to adb.exe, installed via: winget install Google.PlatformTools
-ADB_PATH = (
-    Path(_os.environ["LOCALAPPDATA"])
-    / "Microsoft/WinGet/Packages"
-    / "Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe"
-    / "platform-tools/adb.exe"
-)
 
 # Bluetooth device name substring for the gamepad, used only to look up its
 # real battery level via GATT (see ble_battery_helper.py).
@@ -800,33 +801,8 @@ def set_audio(name: str):
 
 
 # ---------------------------------------------------------------------------
-# TV control via ADB
+# TV control via Hisense's local VIDAA MQTT API
 # ---------------------------------------------------------------------------
-
-def _adb(*args, timeout=10) -> tuple[int, str]:
-    """Run an adb command against the TV. Returns (returncode, stdout)."""
-    cmd = [str(ADB_PATH), "-s", f"{TV_IP}:{TV_PORT}"] + list(args)
-    try:
-        r = _subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, (r.stdout + r.stderr).strip()
-    except Exception as e:
-        return -1, str(e)
-
-def _tv_get_volume() -> int | None:
-    """Return current STREAM_MUSIC volume (0–100), or None on failure."""
-    _, out = _adb("shell", "cmd", "media_session", "volume", "--stream", "3", "--get")
-    for line in out.splitlines():
-        if "volume is" in line:
-            try:
-                return int(line.split("volume is")[1].split()[0])
-            except (ValueError, IndexError):
-                pass
-    return None
-
-def _tv_standby():
-    """Put the TV into standby via ADB. ADB connection will drop after this."""
-    _adb("shell", "input", "keyevent", "KEYCODE_SLEEP")
-    print("TV standby sent.")
 
 def _tv_wake():
     """Wake the TV from standby via Wake-on-LAN magic packet."""
@@ -838,52 +814,36 @@ def _tv_wake():
         s.sendto(magic, ("255.255.255.255", 9))
     print("TV wake-on-LAN sent.")
 
-def _tv_set_input(input_name: str) -> bool:
-    """Switch TV to a named input ('hdmi1', 'hdmi2'). Returns True on success."""
-    input_id = TV_INPUTS.get(input_name.lower())
-    if input_id is None:
-        print(f"Unknown TV input '{input_name}'. Available: {', '.join(TV_INPUTS)}")
-        return False
-    # Force-stop so the activity processes the new intent rather than being brought to front
-    _adb("shell", "am", "force-stop", "com.mediatek.wwtv.tvcenter")
-    time.sleep(0.8)
-    uri = f"content://android.media.tv/passthrough/{input_id.replace('/', '%2F')}"
-    rc, out = _adb("shell", "am", "start",
-                   "-n", "com.mediatek.wwtv.tvcenter/.nav.TurnkeyUiMainActivity",
-                   "-a", "android.intent.action.VIEW",
-                   "-d", uri)
-    if rc == 0:
+def _tv_connect() -> HisenseTV | None:
+    """Connect to the TV's local control API. Returns a connected client, or None if unreachable."""
+    tv = HisenseTV(
+        TV_IP, port=TV_PORT, verify_ssl=False,
+        certfile=str(HISENSE_CERT_FILE), keyfile=str(HISENSE_KEY_FILE),
+        enable_persistence=False,
+    )
+    return tv if tv.connect() else None
+
+def _tv_set_input(tv: HisenseTV, input_name: str) -> bool:
+    """Switch TV to a named input ('tv', 'av', 'hdmi1'-'hdmi4'). Returns True on success."""
+    if tv.set_source(input_name):
         print(f"TV input set to {input_name.upper()}")
         return True
-    print(f"Failed to set TV input: {out}")
+    print(f"Failed to set TV input to {input_name}")
     return False
 
-def _tv_set_volume(target: int):
-    """Set the TV's STREAM_MUSIC volume to target (0–100) via key events."""
-    current = _tv_get_volume()
-    if current is None:
-        print("TV: could not read current volume — skipping volume set.")
-        return
-    delta = target - current
-    key = "KEYCODE_VOLUME_UP" if delta > 0 else "KEYCODE_VOLUME_DOWN"
-    for _ in range(abs(delta)):
-        _adb("shell", "input", "keyevent", key)
-    print(f"TV volume: {current} -> {target}")
+def _tv_set_volume(tv: HisenseTV, target: int):
+    """Set the TV's volume directly (0-100)."""
+    if tv.set_volume(target):
+        print(f"TV volume set to {target}")
+    else:
+        print(f"Warning: failed to set TV volume to {target}")
 
-def _tv_connect() -> bool:
-    """Ensure ADB is connected to the TV. Returns True if ready."""
-    if not ADB_PATH.exists():
-        print("adb not found — TV control unavailable.")
-        return False
-    rc, out = _adb("get-state")
-    if rc == 0 and "device" in out:
-        return True
-    cmd = [str(ADB_PATH), "connect", f"{TV_IP}:{TV_PORT}"]
-    try:
-        r = _subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        return "connected" in r.stdout or "already connected" in r.stdout
-    except Exception:
-        return False
+def _tv_standby(tv: HisenseTV):
+    """Put the TV into standby, if it's currently on."""
+    if tv.power_off():
+        print("TV standby sent.")
+    else:
+        print("Warning: failed to send TV standby.")
 
 
 def game_mode_on():
@@ -906,9 +866,10 @@ def game_mode_on():
     # Wake TV and verify it's reachable before doing anything else
     _tv_wake()
     time.sleep(3)
-    if not _tv_connect():
+    tv = _tv_connect()
+    if tv is None:
         _popup_error("TV is not reachable.\n\nMake sure the TV is powered on and connected to the network.")
-        print("Aborted: TV not reachable via ADB.")
+        print("Aborted: TV not reachable.")
         return False
 
     # Save complete display config so restore can reconstruct the exact topology
@@ -960,8 +921,9 @@ def game_mode_on():
             print(f"Error: failed to switch audio to '{friendly}'.")
 
     # Set TV input + volume for gaming (already confirmed connected above)
-    _tv_set_input(GAME_MODE_CONFIG["tv_input"])
-    _tv_set_volume(GAME_MODE_TV_VOLUME)
+    _tv_set_input(tv, GAME_MODE_CONFIG["tv_input"])
+    _tv_set_volume(tv, GAME_MODE_TV_VOLUME)
+    tv.disconnect()
 
     print("Game mode ON.")
 
@@ -985,8 +947,10 @@ def game_mode_off():
         print(f"Error: failed to restore audio to '{audio_off_target}'.")
 
     # Just put the TV into standby — no input/volume switching
-    if _tv_connect():
-        _tv_standby()
+    tv = _tv_connect()
+    if tv:
+        _tv_standby(tv)
+        tv.disconnect()
 
     # Restore exact display config saved before game mode
     display_restored = False

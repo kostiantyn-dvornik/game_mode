@@ -19,8 +19,8 @@ so it can be adapted to different hardware — see
   - Display topology management (clone/extend, monitor arrangement, save
     and restore exact display layouts) via the Windows `QueryDisplayConfig`
     / `SetDisplayConfig` API.
-  - Android TV control over ADB (wake-on-LAN, standby, input switching,
-    volume control).
+  - Hisense/VIDAA TV control over its local MQTT API (wake-on-LAN, standby,
+    input switching, volume control).
   - `game-mode on` / `game-mode off`: the combined workflow — checks a
     gamepad is connected, warns (non-blocking) if its battery is low,
     wakes and connects to the TV, saves current display/audio/brightness
@@ -72,13 +72,13 @@ things back exactly as they were.
     used only by `ble_battery_helper.py` for the controller low-battery
     warning. If missing, `game_mode.py` still runs fine; that warning is
     just silently skipped.
-- **ADB (Android Platform Tools)** for TV control, expected at the
-  path installed by:
-  ```
-  winget install Google.PlatformTools
-  ```
-  (`game_mode.py` looks for `adb.exe` under
-  `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe\platform-tools\`.)
+  - `myhisense-tv` — controls the TV over its local MQTT API (see TV setup
+    below). Bundled client cert/key files under `hisense_certs/` are the
+    long-known, publicly shared credentials used throughout the smart-home
+    community (e.g. Home Assistant's Hisense TV integrations) for locally
+    controlling a Hisense/VIDAA TV you own — not a secret tied to this TV.
+- A Hisense/VIDAA TV, set up for local MQTT control + Wake-on-LAN as
+  described below.
 - An Xbox-compatible gamepad reachable via XInput (`xinput1_4` /
   `xinput1_3` / `xinput9_1_0`) — `game-mode on` refuses to run without one
   connected. The low-battery warning reads the controller's Bluetooth LE
@@ -90,40 +90,34 @@ things back exactly as they were.
   separate process (`ble_battery_helper.py`) because it hangs
   indefinitely if run in the same process as `comtypes` (used elsewhere
   in `game_mode.py`) — the two don't share a COM apartment model.
-- An Android TV, set up for ADB + Wake-on-LAN as described below.
 
 ## TV setup (one-time)
 
-The scripts control the TV entirely over ADB, and wake it from standby via
-Wake-on-LAN, so the TV itself needs to be configured once before any of
-this works:
+The scripts control the TV over its local MQTT API (port 36669) and wake it
+from standby via Wake-on-LAN, so the TV itself needs to be configured once
+before any of this works:
 
-1. **Enable Developer options**: on the TV, go to
-   `Settings → Device Preferences → About`, then select **Build** /
-   **Android TV OS build** repeatedly (~7 times) until "You are now a
-   developer!" appears.
-2. **Enable network ADB debugging**: `Settings → Device Preferences →
-   Developer options`, turn on **USB debugging** and **Network debugging**
-   (naming varies by firmware; look for anything mentioning ADB or network
-   debugging).
-3. **Enable networked standby / quick start**: `Settings → Device
-   Preferences → Power` (or similar), enable **Quick start mode** /
-   **Networked standby**. Without this, the TV's network interface powers
-   off in standby and Wake-on-LAN magic packets can't reach it.
-4. **Find the TV's IP and MAC address**: `Settings → Network & Internet →
-   [your connection] → IP address / MAC address`. Give the TV a static IP,
-   or a DHCP reservation on your router, so it doesn't change — then set
-   `TV_IP` and `TV_MAC` in [game_mode.py](game_mode.py) to match.
-5. **Authorize this PC for ADB**: with the TV on, run
-   `adb connect <TV_IP>:5555` from a terminal once. The TV will show an
-   "Allow USB/network debugging?" prompt — accept it and check "always
-   allow from this computer". You only need to do this once per PC (the
-   scripts reconnect automatically afterwards).
-6. **Find your TV's HDMI input IDs**: run
-   `adb shell dumpsys tv_input` and look for the input IDs corresponding
-   to each HDMI port, then update `TV_INPUTS` in
-   [game_mode.py](game_mode.py) if they differ from the defaults (they are
-   MediaTek/TV-firmware specific).
+1. **Enable networked standby / quick start** on the TV, if it has such a
+   setting (naming varies by firmware — look under `Settings → General →
+   Power` or similar). Without this, the TV's network interface powers off
+   in standby and Wake-on-LAN magic packets can't reach it.
+2. **Find the TV's IP and MAC address**: `Settings → Network & Internet →
+   [your connection] → IP address / MAC address` (or check your router's
+   device list). Give the TV a static IP, or a DHCP reservation on your
+   router, so it doesn't change — then set `TV_IP` and `TV_MAC` in
+   [local_config.py](local_config.py) (not `game_mode.py` — see
+   [Hardware-specific configuration](#hardware-specific-configuration)).
+3. **Pair once**: the first time `game_mode.py` connects, the TV may show a
+   4-digit pairing PIN on screen. If it does, run the pairing flow once
+   (connect with the bundled cert, call `start_pairing()`, then
+   `authenticate(pin)` — see `hisense_tv.client.HisenseTV` from
+   `myhisense-tv`). In testing, plain read/write control (volume, source,
+   state) worked over the certificate connection without this step on at
+   least one VIDAA model — try the scripts directly first and only pair if
+   commands silently time out.
+4. Valid input names for `GAME_MODE_CONFIG["tv_input"]` / `TV_ON_INPUT` are
+   `"tv"`, `"av"`, `"hdmi1"`–`"hdmi4"` — no need to look up model-specific
+   IDs, these are fixed across VIDAA TVs.
 
 ## Hardware-specific configuration
 
@@ -138,11 +132,11 @@ different TV, or different audio devices:
 | `MONITOR_NAMES` | Dict of role → name substring, matched against Windows' friendly monitor names (see `game_mode.py list`). `desktop` and `tv` are required; add or remove other roles (e.g. `second`) to match however many monitors you have — a single desktop monitor + TV works fine with just those two. |
 | `MONITOR_ORDER_LTR` | Left-to-right order of the roles above when arranging all configured monitors as an extended desktop (used by `turn_on_tv.py`) — must list the same roles as `MONITOR_NAMES`. |
 | `GAME_MODE_CONFIG` | `audio_on` / `audio_off` friendly-name substrings, and `tv_input` for game mode. |
-| `TV_IP`, `TV_MAC`, `TV_PORT` | The TV's network info, for ADB + Wake-on-LAN. |
-| `TV_INPUTS` | HDMI input IDs from `adb shell dumpsys tv_input`; TV-model specific. |
+| `TV_IP`, `TV_MAC` | The TV's network info, for the local MQTT control connection + Wake-on-LAN. Set these in [local_config.py](local_config.py), not here (see TV setup above). |
+| `TV_PORT` | Hisense's local MQTT control port (36669 by default — shouldn't need to change). |
+| `HISENSE_CERT_FILE`, `HISENSE_KEY_FILE` | Paths to the bundled client cert/key (`hisense_certs/`) used for the mutual-TLS MQTT connection. |
 | `GAME_MODE_TV_VOLUME` | TV volume while game mode is active. |
 | `TV_ON_INPUT`, `TV_ON_VOLUME` | TV input/volume used by `turn_on_tv.py` (turning the TV on normally, not for gaming). |
-| `ADB_PATH` | Path to `adb.exe`, if installed somewhere other than the default `winget` location. |
 | `CONTROLLER_BLE_NAME` | Bluetooth name substring for the gamepad, used to find its GATT Battery Service for the low-battery warning. |
 
 The game to launch is configured separately — see

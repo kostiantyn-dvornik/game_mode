@@ -12,11 +12,13 @@ from game_mode import (
 if __name__ == "__main__":
     _tv_wake()
     time.sleep(3)
-    if not _tv_connect():
+    tv = _tv_connect()
+    if tv is None:
         _popup_error("TV is not reachable.\n\nMake sure the TV is powered on and connected to the network.")
         sys.exit(1)
-    _tv_set_input(TV_ON_INPUT)
-    _tv_set_volume(TV_ON_VOLUME)
+    _tv_set_input(tv, TV_ON_INPUT)
+    _tv_set_volume(tv, TV_ON_VOLUME)
+    tv.disconnect()
     save_display_layout()
     _set_display_extend_all()
     _arrange_monitors_ltr(*(MONITOR_NAMES[k] for k in MONITOR_ORDER_LTR))
