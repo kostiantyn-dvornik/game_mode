@@ -465,16 +465,22 @@ _MONITOR_DEFAULTTONEAREST   = 2
 _GW_OWNER                   = 4
 _GWL_EXSTYLE                = -20
 _WS_EX_TOOLWINDOW           = 0x00000080
-_SWP_NOZORDER_NOACTIVATE    = 0x0004 | 0x0010
+_SWP_NOACTIVATE             = 0x0010
+_SW_RESTORE                 = 9
 
 
-def _bring_windows_to_main_screen():
+def _bring_windows_to_main_screen(include_minimized: bool = False):
     """Move visible top-level windows off any other monitor onto the primary one.
 
-    Windows already on the primary monitor, minimized, owned (dialogs,
-    tooltips, etc.), or without a titlebar are left alone. Size is kept,
-    just clamped to fit; moved windows are cascaded so they don't all land
-    in the same spot.
+    Windows already on the primary monitor, owned (dialogs, tooltips,
+    etc.), or without a titlebar are left alone. Size is kept, just
+    clamped to fit; moved windows are cascaded so they don't all land in
+    the same spot.
+
+    Minimized windows are skipped by default. With include_minimized=True
+    they're explicitly un-minimized (restored) and moved too, regardless
+    of which monitor they were on, since there's no visible position to
+    judge "already on the main screen" from while minimized.
     """
     primary_hmon = _user32.MonitorFromPoint(wintypes.POINT(0, 0), _MONITOR_DEFAULTTOPRIMARY)
     info = _MONITORINFO()
@@ -496,7 +502,10 @@ def _bring_windows_to_main_screen():
 
     moved = 0
     for hwnd in hwnds:
-        if not _user32.IsWindowVisible(hwnd) or _user32.IsIconic(hwnd):
+        minimized = _user32.IsIconic(hwnd)
+        if not _user32.IsWindowVisible(hwnd):
+            continue
+        if minimized and not include_minimized:
             continue
         if _user32.GetWindowTextLengthW(hwnd) == 0:
             continue
@@ -504,8 +513,11 @@ def _bring_windows_to_main_screen():
             continue
         if _user32.GetWindowLongW(hwnd, _GWL_EXSTYLE) & _WS_EX_TOOLWINDOW:
             continue
-        if _user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST) == primary_hmon:
+        if not minimized and _user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST) == primary_hmon:
             continue
+
+        if minimized:
+            _user32.ShowWindow(hwnd, _SW_RESTORE)
 
         rect = wintypes.RECT()
         if not _user32.GetWindowRect(hwnd, ctypes.byref(rect)):
@@ -513,12 +525,17 @@ def _bring_windows_to_main_screen():
         width = min(rect.right - rect.left, max_w)
         height = min(rect.bottom - rect.top, max_h)
         step = (moved % 10) * 30
+        # hwndInsertAfter=0 (HWND_TOP) brings it to the top of the z-order so it's
+        # actually visible, not just correctly positioned but buried underneath
+        # other windows; SWP_NOACTIVATE still avoids stealing keyboard focus.
         _user32.SetWindowPos(hwnd, 0, work.left + step, work.top + step, width, height,
-                              _SWP_NOZORDER_NOACTIVATE)
+                              _SWP_NOACTIVATE)
         moved += 1
 
     if moved:
         print(f"Moved {moved} window(s) to the main screen.")
+    else:
+        print("All windows already on the main screen.")
 
 
 # ---------------------------------------------------------------------------

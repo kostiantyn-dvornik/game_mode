@@ -23,10 +23,11 @@ so it can be adapted to different hardware — see
     input switching, volume control).
   - `game-mode on` / `game-mode off`: the combined workflow — checks a
     gamepad is connected, warns (non-blocking) if its battery is low,
-    wakes and connects to the TV, saves current display/audio/brightness
-    state, clones the desktop monitor onto the TV, switches audio to the
-    TV, and sets the TV to the gaming input/volume. `off` reverses all of
-    it using the saved state.
+    wakes and connects to the TV, saves current display/audio/brightness/
+    volume state, clones the desktop monitor onto the TV, switches audio
+    to the TV, maximizes Windows volume, and sets the TV to the gaming
+    input/volume. `off` reverses all of it using the saved state, and
+    also moves any window left on another monitor back to the main screen.
 - **`launch_game.py`** — generic launcher: activates game mode
   (`game_mode_on()`) and then launches any game, either a Steam title
   (`--steam <app id>`) or a local executable/shortcut (`--exe <path>`).
@@ -48,6 +49,12 @@ so it can be adapted to different hardware — see
   once at Windows login via a Startup-folder shortcut, so Steam is already
   running by the time a game is launched and never flashes its window
   mid-game-mode.
+- **`bring_windows_to_main.py`** — moves every top-level window (including
+  minimized ones, which it un-minimizes) off any other monitor onto the
+  primary one, cascading them so they don't stack on top of each other.
+  Useful standalone if a window gets left on a monitor that's since gone
+  dark (e.g. the TV went to standby) — `game-mode off` already does the
+  same thing automatically for non-minimized windows.
 
 State is persisted as JSON under
 `%APPDATA%\BrightnessController\` (`game_mode_state.json` and
@@ -154,6 +161,7 @@ than a terminal:
 | `Turn On TV.lnk` | `turn_on_tv.py` |
 | `Restore Display Layout.lnk` | `restore_display.py` |
 | `Restore Mode.lnk` | `restore_mode.py` |
+| `Bring Windows to Main Screen.lnk` | `bring_windows_to_main.py` |
 
 There's also a shortcut in the Windows **Startup** folder
 (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`), not the
@@ -187,6 +195,7 @@ python turn_on_tv.py         # wake TV, extend all 3 monitors, arrange them
 python restore_display.py    # restore display layout saved by turn_on_tv.py
 python restore_mode.py       # equivalent to `game_mode.py game-mode off`
 python steam_silent_start.py # start Steam minimized to tray, no popups
+python bring_windows_to_main.py # move/restore every window onto the main screen
 ```
 
 ### Adding a shortcut for a new game
