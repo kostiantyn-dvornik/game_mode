@@ -157,7 +157,8 @@ than a terminal:
 
 | Shortcut | Runs |
 |---|---|
-| `Launch Gothic 1 Remake.lnk` | `launch_game.py --steam 1297900 --name "Gothic 1 Remake"` |
+| `Start Game Mode.lnk` | `game_mode.py game-mode on` — just activates game mode, no game launched |
+| `Launch Gothic 1 Remake.lnk` | `launch_game.py --steam 1297900 --name "Gothic 1 Remake"` — activates game mode, then launches the game |
 | `Turn On TV.lnk` | `turn_on_tv.py` |
 | `Restore Display Layout.lnk` | `restore_display.py` |
 | `Restore Mode.lnk` | `restore_mode.py` |
