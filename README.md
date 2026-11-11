@@ -1,7 +1,7 @@
 # Game Mode Controller
 
 A set of Windows/Python scripts that automate switching between a "desktop"
-multi-monitor setup and a "game mode" setup (single TV display + TV audio +
+multi-monitor setup and a "game mode" setup (all three displays duplicated + TV audio +
 TV input switching). It's built around a 3-monitor + Android TV setup, but
 every hardware-specific detail (monitor names, TV network info, audio
 device names, etc.) lives in one config block in [game_mode.py](game_mode.py),
@@ -24,9 +24,10 @@ so it can be adapted to different hardware — see
   - `game-mode on` / `game-mode off`: the combined workflow — checks a
     gamepad is connected, warns (non-blocking) if its battery is low,
     wakes and connects to the TV, saves current display/audio/brightness/
-    volume state, clones the desktop monitor onto the TV, switches audio
+    volume state, duplicates the desktop across Acer, LG and TV,
+    dims the desktop monitor, switches audio
     to the TV, maximizes Windows volume, and sets the TV to the gaming
-    input/volume. `off` reverses all of it using the saved state, and
+    input/volume. `off` restores Windows volume to 50%, reverses the other changes using the saved state, and
     also moves any window left on another monitor back to the main screen.
 - **`launch_game.py`** — generic launcher: activates game mode
   (`game_mode_on()`) and then launches any game, either a Steam title
@@ -59,9 +60,17 @@ so it can be adapted to different hardware — see
 State is persisted as JSON under
 `%APPDATA%\BrightnessController\` (`game_mode_state.json` and
 `display_layout.json`) so `game-mode off` / `restore_display.py` can put
-things back exactly as they were.
+things back exactly as they were. Starting Game Mode again preserves the
+original snapshot. Overlapping start/restore operations are ignored; wait for
+the current operation to finish before retrying. If restoration fails, the
+snapshot is kept so you can run Restore Mode again.
 
 ## Requirements
+
+App output and errors are saved automatically to timestamped files in `logs/`
+next to the scripts, including startup, Restore Mode and unhandled exceptions.
+The console shows the current log path. The newest 20 session logs are retained;
+each file rotates at 2 MB with one backup. Logs are excluded from Git.
 
 - **Windows 10/11** — the scripts rely on Win32 APIs (`user32`, `dxva2`,
   `winreg`) and `ctypes.windll`, so this will not run on other platforms.
@@ -100,6 +109,13 @@ things back exactly as they were.
 
 ## TV setup (one-time)
 
+If the configured TV IP stops working, the scripts automatically look for
+`TV_MAC` in Windows' network neighbor table and retry the discovered address.
+If necessary, discovery probes directly attached IPv4 LANs with /24 to /30
+subnets to refresh that table. The TV must be on the same local network;
+larger subnets rely on an existing neighbor entry. The discovered IP is used
+for the current run; `local_config.py` is not rewritten.
+
 The scripts control the TV over its local MQTT API (port 36669) and wake it
 from standby via Wake-on-LAN, so the TV itself needs to be configured once
 before any of this works:
@@ -134,10 +150,18 @@ of [game_mode.py](game_mode.py) (right after the state-file setup) — that's
 the only place you need to edit to adapt it to different monitors, a
 different TV, or different audio devices:
 
+When adapting this project, specify each monitor's physical placement
+(left to right, plus any vertical offsets) and which display should be the
+main display. For example: **TV on the left, LG in the middle, Acer on the
+right; Acer is the main display; all top edges aligned**. Match
+`MONITOR_ORDER_LTR` to that physical order and use the `desktop` role for
+the main display. The arrangement helper currently aligns all displays at
+the top; stacked or vertically offset layouts require adjusting its Y positions.
+
 | Variable | Notes |
 |---|---|
 | `MONITOR_NAMES` | Dict of role → name substring, matched against Windows' friendly monitor names (see `game_mode.py list`). `desktop` and `tv` are required; add or remove other roles (e.g. `second`) to match however many monitors you have — a single desktop monitor + TV works fine with just those two. |
-| `MONITOR_ORDER_LTR` | Left-to-right order of the roles above when arranging all configured monitors as an extended desktop (used by `turn_on_tv.py`) — must list the same roles as `MONITOR_NAMES`. |
+| `MONITOR_ORDER_LTR` | Left-to-right order when “Turn On TV” extends the desktop: TV → LG → Acer (`tv`, `second`, `desktop`), with Acer as the main display. Must list the same roles as `MONITOR_NAMES`. |
 | `GAME_MODE_CONFIG` | `audio_on` / `audio_off` friendly-name substrings, and `tv_input` for game mode. |
 | `TV_IP`, `TV_MAC` | The TV's network info, for the local MQTT control connection + Wake-on-LAN. Set these in [local_config.py](local_config.py), not here (see TV setup above). |
 | `TV_PORT` | Hisense's local MQTT control port (36669 by default — shouldn't need to change). |
@@ -151,6 +175,34 @@ The game to launch is configured separately — see
 hardware and can be set per-shortcut without touching any code.
 
 ## Desktop shortcuts
+
+Game Mode keeps Acer, LG and TV in the duplicated layout, then sends the LG
+a DDC/CI standby command. Restore Mode sends the LG a wake command.
+Restore Mode restores Acer's saved brightness, or 100% if no saved value exists.
+
+Starting Game Mode opens a console with seven progress steps, including
+controller checks and waiting for the TV. This also works with `pythonw.exe`
+shortcuts and game launchers. The console closes when the startup script exits.
+Restore Mode also opens a console with six progress steps, including display
+restoration and the wait for Acer brightness control. It closes when the script exits.
+Sending a wake packet or connecting to the TV is not reported as power-on:
+startup waits for a TV-reported awake state, sends a power command if the
+TV reports standby, and offers a console prompt if wake-up cannot be confirmed. Starting again
+also checks TV power while preserving the original restore snapshot.
+While waiting for a connection or power-on confirmation, it resends the
+Wake-on-LAN packet after every two unsuccessful waits until the timeout.
+
+If the controller check, TV wake/connection, or display duplication fails,
+type **R** to retry, **S** to skip that step, or **C** to stop startup,
+then press Enter in the progress console. Skipping TV connection also skips TV input/volume commands;
+the remaining initialization continues and game launchers can launch the game.
+Restore Mode can restore the saved settings after a partially completed startup.
+If the TV requests pairing, enter its four-digit on-screen code in the progress
+console and press Enter. Invalid or rejected codes can be entered again; **C**
+returns to the startup retry/skip/cancel prompt. Successful pairing credentials
+are saved by the TV library for future connections.
+Pairing is prompted only when the TV explicitly requests it. TVs that accept
+control without issuing an authentication token can continue normally.
 
 These scripts are invoked day-to-day via Desktop `.lnk` shortcuts rather
 than a terminal:

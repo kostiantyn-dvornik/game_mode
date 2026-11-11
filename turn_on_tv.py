@@ -12,11 +12,15 @@ if __name__ == "__main__":
     _tv_wake()
     tv = _tv_connect_retry()
     if tv is None:
-        _popup_error("TV is not reachable.\n\nMake sure the TV is powered on and connected to the network.")
+        _popup_error("TV did not confirm power-on.\n\nCheck the TV connection and network standby settings.")
         sys.exit(1)
     _tv_set_input(tv, TV_ON_INPUT)
     _tv_set_volume(tv, TV_ON_VOLUME)
     tv.disconnect()
     save_display_layout()
     _set_display_extend_all()
-    _arrange_monitors_ltr(*(MONITOR_NAMES[k] for k in MONITOR_ORDER_LTR))
+    if not _arrange_monitors_ltr(
+            *(MONITOR_NAMES[k] for k in MONITOR_ORDER_LTR),
+            primary=MONITOR_NAMES["desktop"]):
+        _popup_error("Could not arrange TV, LG and Acer with Acer as the main display.")
+        sys.exit(1)
